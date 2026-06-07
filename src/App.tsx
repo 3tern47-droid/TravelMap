@@ -10,9 +10,10 @@ function App() {
   return (
     <div style={{ width: '100vw', height: '100vh', background: 'black' }}>
       <Canvas
-        camera={{ position: [0, 0, 100], fov: 50 }}
+        camera={{ position: [0, 0, 300], fov: 60 }}
         style={{ background: 'black' }}
       >
+        <color attach="background" args={['black']} />
         <ambientLight intensity={1.5} />
         <WorldMap color={mapColor} />
         <MapControls 

@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from 'react'
 import * as THREE from 'three'
-import { geoPath, geoMercator } from 'd3-geo'
+import { geoMercator } from 'd3-geo'
 
 interface WorldMapProps {
   color: string
@@ -12,87 +12,85 @@ const WorldMap = ({ color }: WorldMapProps) => {
   useEffect(() => {
     fetch('https://cdn.jsdelivr.net/npm/@highcharts/map-collection/custom/world-lowres.geo.json')
       .then(res => res.json())
-      .then(data => setGeoData(data))
+      .then(data => {
+        console.log('GeoData loaded:', data)
+        setGeoData(data)
+      })
+      .catch(err => console.error('Failed to load GeoJSON:', err))
   }, [])
 
-  const shapes = useMemo(() => {
+  const projection = useMemo(() => {
+    return geoMercator()
+      .scale(150) // Increased scale for better visibility
+      .translate([0, 0])
+  }, [])
+
+  const features = useMemo(() => {
     if (!geoData) return []
 
-    // Use Mercator projection and scale it to fit the view
-    const projection = geoMercator().scale(20).translate([0, 0])
-    const pathGenerator = geoPath().projection(projection)
+    const meshes: JSX.Element[] = []
 
-    return geoData.features.map((feature: any, index: number) => {
-      const path = pathGenerator(feature)
-      if (!path) return null
+    geoData.features.forEach((feature: any, featureIndex: number) => {
+      const { geometry } = feature
+      if (!geometry) return
 
-      // Convert SVG path to Three.js shapes
-      const svgShapes = transformPathToShapes(path)
-      
-      return (
-        <mesh key={index} rotation={[Math.PI, 0, 0]}>
-          <shapeGeometry args={[svgShapes]} />
-          <meshBasicMaterial color={color} side={THREE.DoubleSide} />
-        </mesh>
-      )
-    }).filter(Boolean)
-  }, [geoData, color])
+      const shapes: THREE.Shape[] = []
+
+      if (geometry.type === 'Polygon') {
+        const shape = createShape(geometry.coordinates, projection)
+        if (shape) shapes.push(shape)
+      } else if (geometry.type === 'MultiPolygon') {
+        geometry.coordinates.forEach((coords: any) => {
+          const shape = createShape(coords, projection)
+          if (shape) shapes.push(shape)
+        })
+      }
+
+      if (shapes.length > 0) {
+        meshes.push(
+          <mesh key={`${featureIndex}`} rotation={[0, 0, 0]}>
+            <shapeGeometry args={[shapes]} />
+            <meshBasicMaterial color={color} side={THREE.DoubleSide} />
+          </mesh>
+        )
+      }
+    })
+
+    return meshes
+  }, [geoData, color, projection])
 
   if (!geoData) return null
 
-  return <group>{shapes}</group>
+  return <group>{features}</group>
 }
 
-// Helper to convert SVG path string to Three.js Shapes
-function transformPathToShapes(pathStr: string): THREE.Shape[] {
-  const shapes: THREE.Shape[] = []
-  const commands = pathStr.match(/[MLHVCSQTAZ][^MLHVCSQTAZ]*/gi) || []
-  
-  let currentShape: THREE.Shape | null = null
-  let x = 0, y = 0
+function createShape(coordinates: any[], projection: any): THREE.Shape | null {
+  const shape = new THREE.Shape()
 
-  commands.forEach(cmd => {
-    const type = cmd[0].toUpperCase()
-    const args = cmd.slice(1).trim().split(/[\s,]+/).map(Number)
+  coordinates.forEach((ring: any[], index: number) => {
+    const points = ring.map(coord => {
+      const projected = projection(coord)
+      return new THREE.Vector2(projected[0], -projected[1]) // Invert Y for Three.js
+    })
 
-    switch (type) {
-      case 'M':
-        if (currentShape) shapes.push(currentShape)
-        currentShape = new THREE.Shape()
-        x = args[0]
-        y = args[1]
-        currentShape.moveTo(x, y)
-        break
-      case 'L':
-        if (currentShape) {
-          x = args[0]
-          y = args[1]
-          currentShape.lineTo(x, y)
-        }
-        break
-      case 'H':
-        if (currentShape) {
-          x = args[0]
-          currentShape.lineTo(x, y)
-        }
-        break
-      case 'V':
-        if (currentShape) {
-          y = args[0]
-          currentShape.lineTo(x, y)
-        }
-        break
-      case 'Z':
-        if (currentShape) {
-          currentShape.closePath()
-        }
-        break
-      // Simplified: only M, L, H, V, Z are common in low-res GeoJSON paths
+    if (index === 0) {
+      // Outer ring
+      shape.moveTo(points[0].x, points[0].y)
+      for (let i = 1; i < points.length; i++) {
+        shape.lineTo(points[i].x, points[i].y)
+      }
+    } else {
+      // Holes
+      const holePath = new THREE.Path()
+      holePath.moveTo(points[0].x, points[0].y)
+      for (let i = 1; i < points.length; i++) {
+        holePath.lineTo(points[i].x, points[i].y)
+      }
+      shape.holes.push(holePath)
     }
   })
 
-  if (currentShape) shapes.push(currentShape)
-  return shapes
+  return shape
 }
 
 export default WorldMap
