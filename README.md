@@ -1,2 +1,0 @@
-# TravelMap
-Interactive Maps
