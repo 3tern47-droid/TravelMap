@@ -19,22 +19,32 @@ const ColorScale = ({ onColorSelect }: ColorScaleProps) => {
   }
 
   return (
-    <div 
-      style={{
-        position: 'absolute',
-        bottom: '20px',
-        right: '20px',
-        width: '300px',
-        height: '20px',
-        borderRadius: '10px',
-        background: 'linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)',
-        cursor: 'pointer',
-        boxShadow: '0 0 10px rgba(255, 255, 255, 0.3)',
-        border: '2px solid white'
-      }}
-      onClick={handleClick}
-      title="Click to change map color"
-    />
+    <div style={{
+      position: 'absolute',
+      bottom: '20px',
+      right: '20px',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-end',
+      gap: '8px'
+    }}>
+      <span style={{ color: 'white', fontSize: '12px', fontFamily: 'sans-serif', textTransform: 'uppercase', letterSpacing: '1px' }}>
+        Change Map Color
+      </span>
+      <div 
+        style={{
+          width: '300px',
+          height: '24px',
+          borderRadius: '12px',
+          background: 'linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000)',
+          cursor: 'pointer',
+          boxShadow: '0 0 15px rgba(255, 255, 255, 0.2)',
+          border: '2px solid white'
+        }}
+        onClick={handleClick}
+        title="Click to change map color"
+      />
+    </div>
   )
 }
 
