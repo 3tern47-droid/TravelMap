@@ -13,23 +13,18 @@ interface WorldMapProps {
 interface PopulatedPlace {
   name: string
   coords: [number, number]
-  rank: number // scalerank 0-10, lower is more important
+  rank: number
   type: string
 }
 
-// Component for a label that stays the same size on screen
-const ConstantScaleLabel = ({ name, position, rank, zoom }: { name: string, position: [number, number, number], rank: number, zoom: number }) => {
+interface StateLabel {
+  name: string
+  coords: [number, number]
+}
+
+const ConstantScaleLabel = ({ name, position, rank, zoom, color = "white", fontSize = 0.4 }: { name: string, position: [number, number, number], rank: number, zoom: number, color?: string, fontSize?: number }) => {
   const ref = useRef<THREE.Group>(null!)
   
-  // Visibility logic based on zoom and importance (rank)
-  // Higher rank = less important = requires higher zoom to see
-  const visible = useMemo(() => {
-    if (rank <= 2) return true // major cities always visible
-    if (rank <= 5) return zoom > 4 // medium cities
-    if (rank <= 8) return zoom > 8 // towns
-    return zoom > 12 // villages/small places
-  }, [rank, zoom])
-
   useFrame(() => {
     if (ref.current) {
       const s = 1 / zoom
@@ -37,21 +32,14 @@ const ConstantScaleLabel = ({ name, position, rank, zoom }: { name: string, posi
     }
   })
 
-  if (!visible) return null
-
   return (
     <Billboard ref={ref} position={position}>
-      <mesh>
-        <circleGeometry args={[rank <= 2 ? 0.15 : 0.08, 16]} />
-        <meshBasicMaterial color={rank <= 2 ? '#ffffff' : '#cccccc'} />
-      </mesh>
       <Text
-        position={[0, 0.4, 0]}
-        fontSize={rank <= 2 ? 0.4 : 0.25}
-        color="white"
+        fontSize={fontSize}
+        color={color}
         anchorX="center"
-        anchorY="bottom"
-        outlineWidth={0.03}
+        anchorY="middle"
+        outlineWidth={fontSize * 0.1}
         outlineColor="#000000"
       >
         {name}
@@ -64,18 +52,19 @@ const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
   const [geoData, setGeoData] = useState<any>(null)
   const [adminData, setAdminData] = useState<any>(null)
   const [places, setPlaces] = useState<PopulatedPlace[]>([])
+  const [stateLabels, setStateLabels] = useState<StateLabel[]>([])
   const { camera } = useThree()
   const [zoom, setZoom] = useState(2)
 
   useFrame(() => {
     const currentZoom = (camera as THREE.OrthographicCamera).zoom
-    if (Math.abs(zoom - currentZoom) > 0.01) {
+    if (Math.abs(zoom - currentZoom) > 0.05) {
       setZoom(currentZoom)
     }
   })
 
   useEffect(() => {
-    // 1. Load Country Polygons (Medium Res)
+    // 1. Load Country Polygons (Simplified for speed)
     fetch('https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson')
       .then(res => res.json())
       .then(data => {
@@ -84,13 +73,27 @@ const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
       })
       .catch(err => onError?.(err.message))
 
-    // 2. Load States/Provinces (High Res - 10m)
+    // 2. Load States/Provinces (High Res)
     fetch('https://d2ad6b4ur7yvpq.cloudfront.net/naturalearth-3.3.0/ne_10m_admin_1_states_provinces.geojson')
       .then(res => res.json())
-      .then(data => setAdminData(data))
+      .then(data => {
+        setAdminData(data)
+        // Extract labels for states
+        const labels = data.features.map((f: any) => {
+          // Use longitude/latitude from properties if available, else first point
+          const coords = f.geometry.type === 'Polygon' 
+            ? f.geometry.coordinates[0][0] 
+            : f.geometry.coordinates[0][0][0]
+          return {
+            name: f.properties.name,
+            coords: coords as [number, number]
+          }
+        })
+        setStateLabels(labels)
+      })
       .catch(err => console.error('States load error:', err))
 
-    // 3. Load Populated Places (Cities, Towns, Villages)
+    // 3. Load Populated Places
     fetch('https://d2ad6b4ur7yvpq.cloudfront.net/naturalearth-3.3.0/ne_10m_populated_places_simple.geojson')
       .then(res => res.json())
       .then(data => {
@@ -106,159 +109,154 @@ const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
   }, [])
 
   const projection = useMemo(() => {
-    return geoMercator()
-      .scale(40) 
-      .translate([0, 0])
-      .center([0, 0])
+    return geoMercator().scale(40).translate([0, 0]).center([0, 0])
   }, [])
 
-  const LineElement = 'line' as any
+  // Optimizing borders: Combine all country borders into a single LineSegments object
+  const countryBordersGeometry = useMemo(() => {
+    if (!geoData) return null
+    const points: THREE.Vector3[] = []
+    geoData.features.forEach((feature: any) => {
+      const coords = feature.geometry.type === 'Polygon' 
+        ? [feature.geometry.coordinates] 
+        : feature.geometry.coordinates
+      
+      coords.forEach((polygon: any) => {
+        polygon.forEach((ring: any) => {
+          for (let i = 0; i < ring.length - 1; i++) {
+            const p1 = projection(ring[i])
+            const p2 = projection(ring[i+1])
+            if (p1 && p2) {
+              points.push(new THREE.Vector3(p1[0], -p1[1], 0.05))
+              points.push(new THREE.Vector3(p2[0], -p2[1], 0.05))
+            }
+          }
+        })
+      })
+    })
+    return new THREE.BufferGeometry().setFromPoints(points)
+  }, [geoData, projection])
 
-  const countryElements = useMemo(() => {
+  // Optimizing state borders: Combine all into a single LineSegments
+  const stateBordersGeometry = useMemo(() => {
+    if (!adminData) return null
+    const points: THREE.Vector3[] = []
+    adminData.features.forEach((feature: any) => {
+      const coords = feature.geometry.type === 'Polygon' 
+        ? [feature.geometry.coordinates] 
+        : feature.geometry.coordinates
+      
+      coords.forEach((polygon: any) => {
+        polygon.forEach((ring: any) => {
+          for (let i = 0; i < ring.length - 1; i++) {
+            const p1 = projection(ring[i])
+            const p2 = projection(ring[i+1])
+            if (p1 && p2) {
+              points.push(new THREE.Vector3(p1[0], -p1[1], 0.03))
+              points.push(new THREE.Vector3(p2[0], -p2[1], 0.03))
+            }
+          }
+        })
+      })
+    })
+    return new THREE.BufferGeometry().setFromPoints(points)
+  }, [adminData, projection])
+
+  const countryFills = useMemo(() => {
     if (!geoData) return []
-    const elements: JSX.Element[] = []
-
-    geoData.features.forEach((feature: any, featureIndex: number) => {
-      const { geometry } = feature
-      if (!geometry) return
+    return geoData.features.map((feature: any, idx: number) => {
       const shapes: THREE.Shape[] = []
-      const borders: THREE.Vector3[][] = []
-
-      if (geometry.type === 'Polygon') {
-        const result = processPolygon(geometry.coordinates, projection)
-        if (result.shape) shapes.push(result.shape)
-        if (result.borders) borders.push(...result.borders)
-      } else if (geometry.type === 'MultiPolygon') {
-        geometry.coordinates.forEach((coords: any) => {
-          const result = processPolygon(coords, projection)
-          if (result.shape) shapes.push(result.shape)
-          if (result.borders) borders.push(...result.borders)
+      const coords = feature.geometry.type === 'Polygon' 
+        ? [feature.geometry.coordinates] 
+        : feature.geometry.coordinates
+      
+      coords.forEach((polygon: any) => {
+        const shape = new THREE.Shape()
+        polygon.forEach((ring: any, rIdx: number) => {
+          const points = ring.map((c: any) => {
+            const p = projection(c)
+            return p ? new THREE.Vector2(p[0], -p[1]) : null
+          }).filter(Boolean)
+          
+          if (points.length < 3) return
+          if (rIdx === 0) {
+            shape.moveTo(points[0].x, points[0].y)
+            points.slice(1).forEach((p: any) => shape.lineTo(p.x, p.y))
+          } else {
+            const hole = new THREE.Path()
+            hole.moveTo(points[0].x, points[0].y)
+            points.slice(1).forEach((p: any) => hole.lineTo(p.x, p.y))
+            shape.holes.push(hole)
+          }
         })
-      }
-
-      if (shapes.length > 0) {
-        elements.push(
-          <mesh key={`country-fill-${featureIndex}`} position={[0, 0, -0.01]}>
-            <shapeGeometry args={[shapes]} />
-            <meshBasicMaterial color={color} transparent opacity={0.3} side={THREE.DoubleSide} />
-          </mesh>
-        )
-      }
-
-      borders.forEach((points, bIndex) => {
-        const borderGeo = new THREE.BufferGeometry().setFromPoints(points)
-        elements.push(
-          <LineElement key={`country-border-${featureIndex}-${bIndex}`} geometry={borderGeo} position={[0, 0, 0.05]}>
-            <lineBasicMaterial color="#ffffff" transparent opacity={0.8} />
-          </LineElement>
-        )
+        shapes.push(shape)
       })
-    })
-    return elements
-  }, [geoData, color, projection])
 
-  const stateElements = useMemo(() => {
-    if (!adminData || zoom < 3) return []
-    const elements: JSX.Element[] = []
-
-    adminData.features.forEach((feature: any, featureIndex: number) => {
-      const { geometry } = feature
-      if (!geometry) return
-      const borders: THREE.Vector3[][] = []
-
-      if (geometry.type === 'Polygon') {
-        const result = processPolygon(geometry.coordinates, projection)
-        if (result.borders) borders.push(...result.borders)
-      } else if (geometry.type === 'MultiPolygon') {
-        geometry.coordinates.forEach((coords: any) => {
-          const result = processPolygon(coords, projection)
-          if (result.borders) borders.push(...result.borders)
-        })
-      }
-
-      borders.forEach((points, bIndex) => {
-        const borderGeo = new THREE.BufferGeometry().setFromPoints(points)
-        elements.push(
-          <LineElement 
-            key={`state-border-${featureIndex}-${bIndex}`} 
-            geometry={borderGeo} 
-            position={[0, 0, 0.03]}
-          >
-            <lineBasicMaterial 
-              color="#ffffff" 
-              transparent 
-              opacity={Math.min(0.4, (zoom - 3) / 10)} 
-            />
-          </LineElement>
-        )
-      })
-    })
-    return elements
-  }, [adminData, zoom, projection])
-
-  const placeElements = useMemo(() => {
-    return places.map((place, index) => {
-      const projected = projection(place.coords)
-      if (!projected) return null
       return (
-        <ConstantScaleLabel 
-          key={`place-${index}`}
-          name={place.name}
-          position={[projected[0], -projected[1], 0.1]}
-          rank={place.rank}
-          zoom={zoom}
-        />
+        <mesh key={`fill-${idx}`} position={[0,0,-0.01]}>
+          <shapeGeometry args={[shapes]} />
+          <meshBasicMaterial color={color} transparent opacity={0.2} />
+        </mesh>
       )
-    }).filter(Boolean)
-  }, [places, zoom, projection])
-
-  if (!geoData) return null
+    })
+  }, [geoData, projection, color])
 
   return (
     <group>
-      {countryElements}
-      {stateElements}
-      {placeElements}
+      {countryFills}
+      
+      {countryBordersGeometry && (
+        <lineSegments geometry={countryBordersGeometry}>
+          <lineBasicMaterial color="white" opacity={0.6} transparent />
+        </lineSegments>
+      )}
+
+      {stateBordersGeometry && zoom > 3 && (
+        <lineSegments geometry={stateBordersGeometry}>
+          <lineBasicMaterial 
+            color="white" 
+            opacity={Math.min(0.3, (zoom - 3) / 10)} 
+            transparent 
+          />
+        </lineSegments>
+      )}
+
+      {/* State Labels */}
+      {zoom > 5 && stateLabels.map((s, i) => {
+        const p = projection(s.coords)
+        if (!p) return null
+        return (
+          <ConstantScaleLabel 
+            key={`state-label-${i}`}
+            name={s.name}
+            position={[p[0], -p[1], 0.04]}
+            rank={5}
+            zoom={zoom}
+            color="#aaaaaa"
+            fontSize={0.25}
+          />
+        )
+      })}
+
+      {/* Populated Places */}
+      {places.map((place, i) => {
+        const visible = place.rank <= 2 || (place.rank <= 5 && zoom > 6) || (place.rank <= 8 && zoom > 10) || zoom > 14
+        if (!visible) return null
+        const p = projection(place.coords)
+        if (!p) return null
+        return (
+          <ConstantScaleLabel 
+            key={`place-${i}`}
+            name={place.name}
+            position={[p[0], -p[1], 0.1]}
+            rank={place.rank}
+            zoom={zoom}
+            fontSize={place.rank <= 2 ? 0.35 : 0.2}
+          />
+        )
+      })}
     </group>
   )
-}
-
-function processPolygon(coordinates: any[], projection: any) {
-  const shape = new THREE.Shape()
-  const borders: THREE.Vector3[][] = []
-
-  coordinates.forEach((ring: any[], index: number) => {
-    if (!Array.isArray(ring) || ring.length < 3) return
-
-    const points = ring.map(coord => {
-      const projected = projection(coord)
-      return projected ? new THREE.Vector2(projected[0], -projected[1]) : null
-    }).filter((p): p is THREE.Vector2 => p !== null)
-
-    if (points.length < 3) return
-
-    const borderPts = points.map(p => new THREE.Vector3(p.x, p.y, 0))
-    borderPts.push(borderPts[0].clone())
-    borders.push(borderPts)
-
-    if (index === 0) {
-      shape.moveTo(points[0].x, points[0].y)
-      for (let i = 1; i < points.length; i++) {
-        shape.lineTo(points[i].x, points[i].y)
-      }
-      shape.closePath()
-    } else {
-      const holePath = new THREE.Path()
-      holePath.moveTo(points[0].x, points[0].y)
-      for (let i = 1; i < points.length; i++) {
-        holePath.lineTo(points[i].x, points[i].y)
-      }
-      holePath.closePath()
-      shape.holes.push(holePath)
-    }
-  })
-
-  return { shape, borders }
 }
 
 export default WorldMap
