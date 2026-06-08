@@ -10,57 +10,44 @@ interface WorldMapProps {
   onError?: (error: string) => void
 }
 
-const LANDMARKS = [
-  { name: 'Paris', coords: [2.3522, 48.8566] as [number, number], type: 'city' },
-  { name: 'New York', coords: [-74.006, 40.7128] as [number, number], type: 'city' },
-  { name: 'Tokyo', coords: [139.6503, 35.6762] as [number, number], type: 'city' },
-  { name: 'London', coords: [-0.1278, 51.5074] as [number, number], type: 'city' },
-  { name: 'Sydney', coords: [151.2093, -33.8688] as [number, number], type: 'city' },
-  { name: 'Cairo', coords: [31.2357, 30.0444] as [number, number], type: 'city' },
-  { name: 'Rio de Janeiro', coords: [-43.1729, -22.9068] as [number, number], type: 'city' },
-  { name: 'Beijing', coords: [116.4074, 39.9042] as [number, number], type: 'city' },
-  { name: 'Moscow', coords: [37.6173, 55.7558] as [number, number], type: 'city' },
-  { name: 'Mumbai', coords: [72.8777, 19.0760] as [number, number], type: 'city' },
-  { name: 'Cape Town', coords: [18.4233, -33.9249] as [number, number], type: 'city' },
-  { name: 'Mexico City', coords: [-99.1332, 19.4326] as [number, number], type: 'city' },
-  // Adding more "villages" / local places
-  { name: 'Versailles', coords: [2.1301, 48.8014] as [number, number], type: 'village' },
-  { name: 'Hoboken', coords: [-74.0324, 40.7440] as [number, number], type: 'village' },
-  { name: 'Yokohama', coords: [139.6380, 35.4437] as [number, number], type: 'village' },
-  { name: 'Cambridge', coords: [0.1218, 52.2053] as [number, number], type: 'village' },
-  { name: 'Byron Bay', coords: [153.6120, -28.6474] as [number, number], type: 'village' },
-  { name: 'Giza', coords: [31.2132, 30.0131] as [number, number], type: 'village' },
-  { name: 'Niteroi', coords: [-43.1244, -22.8859] as [number, number], type: 'village' },
-  { name: 'Tianjin', coords: [117.2008, 39.0842] as [number, number], type: 'village' },
-]
+interface PopulatedPlace {
+  name: string
+  coords: [number, number]
+  rank: number // scalerank 0-10, lower is more important
+  type: string
+}
 
 // Component for a label that stays the same size on screen
-const ConstantScaleLabel = ({ name, position, type }: { name: string, position: [number, number, number], type: string }) => {
+const ConstantScaleLabel = ({ name, position, rank, zoom }: { name: string, position: [number, number, number], rank: number, zoom: number }) => {
   const ref = useRef<THREE.Group>(null!)
-  const { camera } = useThree()
+  
+  // Visibility logic based on zoom and importance (rank)
+  // Higher rank = less important = requires higher zoom to see
+  const visible = useMemo(() => {
+    if (rank <= 2) return true // major cities always visible
+    if (rank <= 5) return zoom > 4 // medium cities
+    if (rank <= 8) return zoom > 8 // towns
+    return zoom > 12 // villages/small places
+  }, [rank, zoom])
 
   useFrame(() => {
     if (ref.current) {
-      const zoom = (camera as THREE.OrthographicCamera).zoom
       const s = 1 / zoom
       ref.current.scale.set(s, s, s)
-      
-      // Hide village labels if zoomed out
-      if (type === 'village') {
-        ref.current.visible = zoom > 6
-      }
     }
   })
+
+  if (!visible) return null
 
   return (
     <Billboard ref={ref} position={position}>
       <mesh>
-        <circleGeometry args={[type === 'city' ? 0.15 : 0.1, 16]} />
-        <meshBasicMaterial color={type === 'city' ? '#ffffff' : '#aaaaaa'} />
+        <circleGeometry args={[rank <= 2 ? 0.15 : 0.08, 16]} />
+        <meshBasicMaterial color={rank <= 2 ? '#ffffff' : '#cccccc'} />
       </mesh>
       <Text
         position={[0, 0.4, 0]}
-        fontSize={type === 'city' ? 0.4 : 0.3}
+        fontSize={rank <= 2 ? 0.4 : 0.25}
         color="white"
         anchorX="center"
         anchorY="bottom"
@@ -76,41 +63,47 @@ const ConstantScaleLabel = ({ name, position, type }: { name: string, position: 
 const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
   const [geoData, setGeoData] = useState<any>(null)
   const [adminData, setAdminData] = useState<any>(null)
+  const [places, setPlaces] = useState<PopulatedPlace[]>([])
   const { camera } = useThree()
-  const [zoom, setZoom] = useState(1)
+  const [zoom, setZoom] = useState(2)
 
-  useEffect(() => {
-    const updateZoom = () => {
-      if ((camera as THREE.OrthographicCamera).zoom) {
-        setZoom((camera as THREE.OrthographicCamera).zoom)
-      }
+  useFrame(() => {
+    const currentZoom = (camera as THREE.OrthographicCamera).zoom
+    if (Math.abs(zoom - currentZoom) > 0.01) {
+      setZoom(currentZoom)
     }
-    const interval = setInterval(updateZoom, 100)
-    return () => clearInterval(interval)
-  }, [camera])
+  })
 
   useEffect(() => {
-    // Load country boundaries
+    // 1. Load Country Polygons (Medium Res)
     fetch('https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson')
       .then(res => res.json())
       .then(data => {
         setGeoData(data)
         if (onLoad) onLoad()
       })
-      .catch(err => {
-        if (onError) onError(err.message)
-      })
+      .catch(err => onError?.(err.message))
 
-    // Load admin-1 boundaries (States/Provinces) for detail
-    // Using a simplified version to maintain performance
-    fetch('https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_1_states_provinces.geojson')
+    // 2. Load States/Provinces (High Res - 10m)
+    fetch('https://d2ad6b4ur7yvpq.cloudfront.net/naturalearth-3.3.0/ne_10m_admin_1_states_provinces.geojson')
+      .then(res => res.json())
+      .then(data => setAdminData(data))
+      .catch(err => console.error('States load error:', err))
+
+    // 3. Load Populated Places (Cities, Towns, Villages)
+    fetch('https://d2ad6b4ur7yvpq.cloudfront.net/naturalearth-3.3.0/ne_10m_populated_places_simple.geojson')
       .then(res => res.json())
       .then(data => {
-        console.log('Admin-1 data loaded:', data.features.length)
-        setAdminData(data)
+        const processedPlaces = data.features.map((f: any) => ({
+          name: f.properties.name,
+          coords: f.geometry.coordinates as [number, number],
+          rank: f.properties.scalerank,
+          type: f.properties.featurecla
+        }))
+        setPlaces(processedPlaces)
       })
-      .catch(err => console.error('Failed to load admin-1 data:', err))
-  }, [onLoad, onError])
+      .catch(err => console.error('Places load error:', err))
+  }, [])
 
   const projection = useMemo(() => {
     return geoMercator()
@@ -119,24 +112,30 @@ const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
       .center([0, 0])
   }, [])
 
-  const mapElements = useMemo(() => {
+  const LineElement = 'line' as any
+
+  const countryElements = useMemo(() => {
     if (!geoData) return []
     const elements: JSX.Element[] = []
 
-    // 1. Countries Fill
     geoData.features.forEach((feature: any, featureIndex: number) => {
       const { geometry } = feature
       if (!geometry) return
       const shapes: THREE.Shape[] = []
+      const borders: THREE.Vector3[][] = []
+
       if (geometry.type === 'Polygon') {
         const result = processPolygon(geometry.coordinates, projection)
         if (result.shape) shapes.push(result.shape)
+        if (result.borders) borders.push(...result.borders)
       } else if (geometry.type === 'MultiPolygon') {
         geometry.coordinates.forEach((coords: any) => {
           const result = processPolygon(coords, projection)
           if (result.shape) shapes.push(result.shape)
+          if (result.borders) borders.push(...result.borders)
         })
       }
+
       if (shapes.length > 0) {
         elements.push(
           <mesh key={`country-fill-${featureIndex}`} position={[0, 0, -0.01]}>
@@ -145,13 +144,28 @@ const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
           </mesh>
         )
       }
-    })
 
-    // 2. Political Borders (Country Level)
-    geoData.features.forEach((feature: any, featureIndex: number) => {
+      borders.forEach((points, bIndex) => {
+        const borderGeo = new THREE.BufferGeometry().setFromPoints(points)
+        elements.push(
+          <LineElement key={`country-border-${featureIndex}-${bIndex}`} geometry={borderGeo} position={[0, 0, 0.05]}>
+            <lineBasicMaterial color="#ffffff" transparent opacity={0.8} />
+          </LineElement>
+        )
+      })
+    })
+    return elements
+  }, [geoData, color, projection])
+
+  const stateElements = useMemo(() => {
+    if (!adminData || zoom < 3) return []
+    const elements: JSX.Element[] = []
+
+    adminData.features.forEach((feature: any, featureIndex: number) => {
       const { geometry } = feature
       if (!geometry) return
       const borders: THREE.Vector3[][] = []
+
       if (geometry.type === 'Polygon') {
         const result = processPolygon(geometry.coordinates, projection)
         if (result.borders) borders.push(...result.borders)
@@ -161,67 +175,52 @@ const WorldMap = ({ color, onLoad, onError }: WorldMapProps) => {
           if (result.borders) borders.push(...result.borders)
         })
       }
+
       borders.forEach((points, bIndex) => {
         const borderGeo = new THREE.BufferGeometry().setFromPoints(points)
-        const LineElement = 'line' as any
         elements.push(
-          <LineElement key={`border-country-${featureIndex}-${bIndex}`} geometry={borderGeo} position={[0, 0, 0.05]}>
-            <lineBasicMaterial color="#ffffff" transparent opacity={0.6} />
+          <LineElement 
+            key={`state-border-${featureIndex}-${bIndex}`} 
+            geometry={borderGeo} 
+            position={[0, 0, 0.03]}
+          >
+            <lineBasicMaterial 
+              color="#ffffff" 
+              transparent 
+              opacity={Math.min(0.4, (zoom - 3) / 10)} 
+            />
           </LineElement>
         )
       })
     })
-
-    // 3. States/Provinces (Admin-1) - Adaptive Visibility
-    if (adminData && zoom > 4) {
-      adminData.features.forEach((feature: any, featureIndex: number) => {
-        const { geometry } = feature
-        if (!geometry) return
-        const borders: THREE.Vector3[][] = []
-        if (geometry.type === 'Polygon') {
-          const result = processPolygon(geometry.coordinates, projection)
-          if (result.borders) borders.push(...result.borders)
-        } else if (geometry.type === 'MultiPolygon') {
-          geometry.coordinates.forEach((coords: any) => {
-            const result = processPolygon(coords, projection)
-            if (result.borders) borders.push(...result.borders)
-          })
-        }
-        borders.forEach((points, bIndex) => {
-          const borderGeo = new THREE.BufferGeometry().setFromPoints(points)
-          const LineElement = 'line' as any
-          elements.push(
-            <LineElement key={`border-state-${featureIndex}-${bIndex}`} geometry={borderGeo} position={[0, 0, 0.04]}>
-              <lineBasicMaterial color="#ffffff" transparent opacity={0.2} />
-            </LineElement>
-          )
-        })
-      })
-    }
-
-    // 4. Landmarks / Cities
-    LANDMARKS.forEach((landmark, index) => {
-      const projected = projection(landmark.coords)
-      if (projected) {
-        const x = projected[0]
-        const y = -projected[1]
-        elements.push(
-          <ConstantScaleLabel 
-            key={`landmark-${index}`} 
-            name={landmark.name} 
-            position={[x, y, 0.1]} 
-            type={landmark.type}
-          />
-        )
-      }
-    })
-
     return elements
-  }, [geoData, adminData, color, projection, zoom])
+  }, [adminData, zoom, projection])
+
+  const placeElements = useMemo(() => {
+    return places.map((place, index) => {
+      const projected = projection(place.coords)
+      if (!projected) return null
+      return (
+        <ConstantScaleLabel 
+          key={`place-${index}`}
+          name={place.name}
+          position={[projected[0], -projected[1], 0.1]}
+          rank={place.rank}
+          zoom={zoom}
+        />
+      )
+    }).filter(Boolean)
+  }, [places, zoom, projection])
 
   if (!geoData) return null
 
-  return <group>{mapElements}</group>
+  return (
+    <group>
+      {countryElements}
+      {stateElements}
+      {placeElements}
+    </group>
+  )
 }
 
 function processPolygon(coordinates: any[], projection: any) {
